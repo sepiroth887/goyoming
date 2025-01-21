@@ -1,0 +1,20 @@
+port: 8080
+listen: 127.0.0.1 
+
+homeassistant:
+  host: https://homeassistant.local:8123
+  token: <mysecrettoken>
+  targetMediaPlayer: media_player.office
+
+tts:
+  ttsPlatform: tts.piper
+  voice: glados
+  ttsSpeed: 100
+  volumeLevel: 0.10
+  announce: true
+  maxMessageChars: 2048
+
+activitySettings:
+  recognitionStart: notification-pluck-on.mp3
+  recognitionStop: notification-pluck-off.mp3
+  mediaFolder: sounds
