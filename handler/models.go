@@ -3,11 +3,15 @@ package handler
 import (
 	"net"
 	"net/http"
+	"time"
 )
 
 type Handler struct {
-	config     Configuration
-	httpClient *http.Client
+	config       Configuration
+	httpClient   *http.Client
+	timeOnWake   time.Time
+	isAwake      bool
+	hasResponded bool
 }
 
 type Event struct {

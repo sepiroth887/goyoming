@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -29,6 +30,8 @@ func (h *Handler) ListenAndServe() error {
 		return err
 	}
 
+	go h.monitorSatellite()
+
 	defer listener.Close()
 
 	for {
@@ -42,6 +45,20 @@ func (h *Handler) ListenAndServe() error {
 			conn: conn,
 		}
 		go client.Handle(h)
+	}
+}
+
+func (h *Handler) monitorSatellite() {
+	for range time.NewTicker(time.Second * 2).C {
+		if h.isAwake && !h.hasResponded {
+			if time.Now().After(h.timeOnWake.Add(time.Second * 15)) {
+				log.Warn("recognition started, but no response. restarting satellite")
+				err := exec.Command("systemctl", "restart", "satellite").Run()
+				if err != nil {
+					log.Errorf("failed to restart satellite: %v", err)
+				}
+			}
+		}
 	}
 }
 
@@ -90,11 +107,20 @@ func (c *Client) Handle(h *Handler) {
 
 		switch event.Type {
 		case "detection":
+			h.isAwake = true
+			h.timeOnWake = time.Now()
 			go h.playSound(h.config.ActivitySettings.RecognitionStart)
+		case "voice-started":
+			h.timeOnWake = time.Now()
 		case "voice-stopped":
+			h.timeOnWake = time.Now()
 			go h.playSound(h.config.ActivitySettings.RecognitionStop)
+		case "transcript":
+			h.timeOnWake = time.Now()
 		case "synthesize":
 			go h.syntesize(event.Data["text"].(string))
+			h.hasResponded = true
+			h.isAwake = false
 		}
 	}
 }
@@ -122,21 +148,64 @@ func (h *Handler) playSound(mediaFile string) {
 	req.Header.Set("content-type", "application/json")
 
 	res, err := h.httpClient.Do(req)
-	if err != nil || res.StatusCode < 200 || res.StatusCode > 299 {
-		log.Errorf("failed to make voice notification request [%d]: %v", res.StatusCode, err)
+	if err != nil {
+		log.Errorf("failed to make voice notification request: %v", err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode < 200 || res.StatusCode > 299 {
+		out, _ := io.ReadAll(res.Body)
+		log.Errorf("unexpected response from hass [%d]: %s", res.StatusCode, string(out))
 	}
 }
 
-func (h *Handler) syntesize(rawText string) {
+func trimRawText(rawText string) string {
+	if len(rawText) <= 500 {
+		return rawText
+	}
+	cut := 500
+	for i := len(rawText) - 1; i >= 400; i-- {
+		if i > 500 {
+			continue
+		}
+		if rawText[i] == '.' || rawText[i] == '?' || rawText[i] == '!' {
+			cut = i
+			break
+		}
+	}
 
-	text := strings.NewReplacer("*", "", "&", "", "[", "", "]", "", "(", "", ")", "", "{", "", "}", "").Replace(rawText)
+	trimString := rawText[0 : cut+1]
+	return trimString + " This response was trimmed."
+}
+
+func inTimeSpan(start, end, check time.Time) bool {
+	if start.Before(end) {
+		return !check.Before(start) && !check.After(end)
+	}
+	if start.Equal(end) {
+		return check.Equal(start)
+	}
+	return !start.After(check) || !end.Before(check)
+}
+
+func (h *Handler) syntesize(rawText string) {
+	text := strings.NewReplacer("*", "", "&", "", "[", "", "]", "", "(", "", ")", "", "{", "", "}", "", "\n", "", "\r", "").Replace(rawText)
+
+	text = trimRawText(text)
+	log.Debugf("sending payload to tts engine: %s", text)
+
+	adjustedVolume := h.config.Tts.VolumeLevel
+	start, _ := time.Parse("15:04", "20:00")
+	end, _ := time.Parse("15:04", "08:00")
+	if inTimeSpan(start, end, time.Now()) {
+		adjustedVolume = adjustedVolume * 0.85
+	}
 
 	payload := TTSPayload{
 		EntityID:    h.config.Homeassistant.TargetMediaPlayer,
 		Platform:    h.config.Tts.TtsPlatform,
 		Voice:       h.config.Tts.Voice,
 		Announce:    h.config.Tts.Announce,
-		VolumeLevel: h.config.Tts.VolumeLevel,
+		VolumeLevel: adjustedVolume,
 		Message:     text,
 	}
 
